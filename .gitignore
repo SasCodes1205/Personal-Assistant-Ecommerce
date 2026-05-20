@@ -1,6 +1,11 @@
-
+node_modules
+.next
+dist
+build
 .env
-venv/
-__pycache__/
-*.pyc
-*.pyo
+.env.local
+.env.*.local
+*.log
+.DS_Store
+.turbo
+prisma/migrations/dev*
