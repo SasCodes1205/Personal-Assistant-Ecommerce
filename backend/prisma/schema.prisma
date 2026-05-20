@@ -1,0 +1,198 @@
+// Prisma schema for CEO Assistant
+// Single-user system. CEO + project lead access.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// EMAIL & DRAFT
+// ============================================================================
+
+enum EmailCategory {
+  VIP
+  URGENT
+  VENDOR_OPS
+  CUSTOMER
+  NEWSLETTER_FYI
+  SPAM
+  UNCLASSIFIED
+}
+
+enum DraftStatus {
+  PENDING_REVIEW
+  APPROVED
+  EDITED_AND_SENT
+  REJECTED
+  AUTO_REJECTED // compliance flag
+}
+
+enum BusinessUnit {
+  NUTRITUNES
+  CEYLON_NUTRITIONALS
+  PERSONAL
+  UNKNOWN
+}
+
+model Email {
+  id              String         @id @default(cuid())
+  gmailMessageId  String         @unique
+  gmailThreadId   String
+  from            String
+  fromName        String?
+  to              String
+  subject         String
+  bodyText        String         @db.Text
+  bodyHtml        String?        @db.Text
+  receivedAt      DateTime
+  category        EmailCategory  @default(UNCLASSIFIED)
+  businessUnit    BusinessUnit   @default(UNKNOWN)
+  isVip           Boolean        @default(false)
+  triageReasoning String?        @db.Text  // Claude's reasoning
+  draft           Draft?
+  createdAt       DateTime       @default(now())
+
+  @@index([category, receivedAt])
+  @@index([gmailThreadId])
+}
+
+model Draft {
+  id              String      @id @default(cuid())
+  emailId         String      @unique
+  email           Email       @relation(fields: [emailId], references: [id], onDelete: Cascade)
+  bodyText        String      @db.Text
+  status          DraftStatus @default(PENDING_REVIEW)
+  modelUsed       String                              // e.g. claude-sonnet-4-6
+  complianceFlags Json?                               // FDA/FTC issues flagged by reviewer agent
+  editedBody      String?     @db.Text                // CEO's final edit, if different
+  sentAt          DateTime?
+  rejectedReason  String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([status, createdAt])
+}
+
+model VipContact {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String
+  relationship  String   // e.g. "Legal counsel", "Board member", "Top buyer - Whole Foods"
+  notes         String?  @db.Text
+  businessUnit  BusinessUnit
+  createdAt     DateTime @default(now())
+
+  @@index([businessUnit])
+}
+
+// ============================================================================
+// MEETING WORKFLOW
+// ============================================================================
+
+enum MeetingStatus {
+  UPLOADED
+  TRANSCRIBING
+  TRANSCRIBED
+  EXTRACTING
+  COMPLETED
+  FAILED
+}
+
+model Meeting {
+  id                String        @id @default(cuid())
+  title             String
+  audioUrl          String        // Supabase Storage URL
+  durationSeconds   Int?
+  attendees         Json?         // [{ name, email, role }]
+  businessUnit      BusinessUnit  @default(UNKNOWN)
+  meetingDate       DateTime
+  status            MeetingStatus @default(UPLOADED)
+
+  // Transcription
+  assemblyAiId      String?       @unique
+  transcriptText    String?       @db.Text
+  speakerSegments   Json?         // [{ speaker, start, end, text }]
+  transcribedAt     DateTime?
+
+  // Extraction (Claude output)
+  summary           String?       @db.Text
+  keyDecisions      Json?         // [{ decision, owner, context }]
+  ceoCommitments    Json?         // [{ commitment, deadline, recipient }]
+  actionItems       ActionItem[]
+  openQuestions     Json?         // [{ question, raisedBy }]
+  topics            String[]
+  extractedAt       DateTime?
+
+  // Audit
+  errorMessage      String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([status, meetingDate])
+  @@index([businessUnit])
+}
+
+model ActionItem {
+  id          String   @id @default(cuid())
+  meetingId   String
+  meeting     Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  text        String
+  owner       String?
+  dueDate     DateTime?
+  isCeoTask   Boolean  @default(false)
+  completed   Boolean  @default(false)
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([meetingId])
+  @@index([isCeoTask, completed])
+}
+
+// ============================================================================
+// BRIEFINGS
+// ============================================================================
+
+enum BriefingType {
+  MORNING_DIGEST
+  END_OF_DAY
+  PRE_MEETING
+  AD_HOC
+}
+
+model Briefing {
+  id           String       @id @default(cuid())
+  type         BriefingType
+  generatedFor DateTime     // The day/time the briefing is *about*
+  bodyMarkdown String       @db.Text
+  modelUsed    String
+  slackTs      String?      // Slack message timestamp for threading
+  generatedAt  DateTime     @default(now())
+
+  @@index([type, generatedFor])
+}
+
+// ============================================================================
+// AUDIT LOG — every Claude call, every action
+// ============================================================================
+
+model AuditLog {
+  id            String   @id @default(cuid())
+  eventType     String   // "claude_call" | "draft_approved" | "email_sent" | etc.
+  agent         String?  // "EmailTriage" | "EmailDrafter" | ...
+  model         String?
+  promptTokens  Int?
+  outputTokens  Int?
+  cachedTokens  Int?
+  costUsd       Decimal? @db.Decimal(10, 6)
+  payload       Json?
+  resultRefId   String?  // FK-ish: meetingId, draftId, etc.
+  createdAt     DateTime @default(now())
+
+  @@index([eventType, createdAt])
+  @@index([resultRefId])
+}
