@@ -1,0 +1,236 @@
+// Prisma schema for CEO Assistant — Microsoft 365 (Graph/Teams) stack
+// Single-user system. CEO + project lead access.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// EMAIL & DRAFT
+// ============================================================================
+
+enum EmailCategory {
+  VIP
+  URGENT
+  VENDOR_OPS
+  CUSTOMER
+  NEWSLETTER_FYI
+  SPAM
+  UNCLASSIFIED
+}
+
+enum DraftStatus {
+  PENDING_REVIEW
+  APPROVED        // approved in dashboard; draft sits in Outlook Drafts for CEO to send
+  EDITED_AND_SENT
+  REJECTED
+  AUTO_REJECTED   // blocked by compliance reviewer (RED zone)
+}
+
+// Compliance publication zone (Master Plan Section 6)
+enum ComplianceZone {
+  GREEN
+  YELLOW
+  RED
+  NOT_REVIEWED
+}
+
+enum BusinessUnit {
+  NUTRITUNES
+  CEYLON_NUTRITIONALS
+  PERSONAL
+  UNKNOWN
+}
+
+model Email {
+  id                 String         @id @default(cuid())
+  providerMessageId  String         @unique   // was gmailMessageId — now Graph message id
+  providerThreadId   String                   // was gmailThreadId — now Graph conversationId
+  from               String
+  fromName           String?
+  to                 String
+  subject            String
+  bodyText           String         @db.Text
+  bodyHtml           String?        @db.Text
+  receivedAt         DateTime
+  category           EmailCategory  @default(UNCLASSIFIED)
+  businessUnit       BusinessUnit   @default(UNKNOWN)
+  isVip              Boolean        @default(false)
+  triageReasoning    String?        @db.Text
+  draft              Draft?
+  createdAt          DateTime       @default(now())
+
+  @@index([category, receivedAt])
+  @@index([providerThreadId])
+}
+
+model Draft {
+  id              String         @id @default(cuid())
+  emailId         String         @unique
+  email           Email          @relation(fields: [emailId], references: [id], onDelete: Cascade)
+  bodyText        String         @db.Text
+  status          DraftStatus    @default(PENDING_REVIEW)
+  modelUsed       String
+  providerDraftId String?                              // Outlook draft message id (was stashed in complianceFlags)
+  complianceZone  ComplianceZone @default(NOT_REVIEWED)
+  complianceFlags Json?                                // structured FDA/FTC findings from reviewer agent
+  editedBody      String?        @db.Text
+  sentAt          DateTime?
+  rejectedReason  String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([status, createdAt])
+  @@index([complianceZone])
+}
+
+model VipContact {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String
+  relationship  String
+  notes         String?  @db.Text
+  businessUnit  BusinessUnit
+  createdAt     DateTime @default(now())
+
+  @@index([businessUnit])
+}
+
+// ============================================================================
+// MEETING WORKFLOW
+// ============================================================================
+
+enum MeetingStatus {
+  PENDING       // Teams meeting recorded; transcript not yet available
+  UPLOADED      // audio uploaded (AssemblyAI path)
+  TRANSCRIBING
+  TRANSCRIBED
+  EXTRACTING
+  COMPLETED
+  FAILED
+}
+
+enum TranscriptSource {
+  TEAMS         // pulled from Microsoft Graph
+  ASSEMBLYAI    // transcribed from uploaded/Zoom/in-person audio
+  UPLOAD        // raw text transcript supplied directly
+}
+
+model Meeting {
+  id                   String           @id @default(cuid())
+  title                String
+  audioUrl             String?          // optional — Teams meetings have no upload
+  durationSeconds      Int?
+  attendees            Json?
+  businessUnit         BusinessUnit     @default(UNKNOWN)
+  meetingDate          DateTime
+  status               MeetingStatus    @default(PENDING)
+  transcriptSource     TranscriptSource @default(ASSEMBLYAI)
+
+  // Teams / Graph
+  graphOnlineMeetingId String?          // onlineMeeting id used to fetch transcript
+  graphTranscriptId    String?
+
+  // AssemblyAI (fallback)
+  assemblyAiId         String?          @unique
+
+  // Common transcript fields
+  transcriptText       String?          @db.Text
+  speakerSegments      Json?            // [{ speaker, start, end, text }]
+  transcribedAt        DateTime?
+
+  // Extraction (Claude output)
+  summary              String?          @db.Text
+  keyDecisions         Json?
+  ceoCommitments       Json?
+  actionItems          ActionItem[]
+  openQuestions        Json?
+  topics               String[]
+  extractedAt          DateTime?
+
+  // Audit
+  errorMessage         String?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  @@index([status, meetingDate])
+  @@index([businessUnit])
+}
+
+model ActionItem {
+  id          String    @id @default(cuid())
+  meetingId   String
+  meeting     Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  text        String
+  owner       String?
+  dueDate     DateTime?
+  isCeoTask   Boolean   @default(false)
+  completed   Boolean   @default(false)
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([meetingId])
+  @@index([isCeoTask, completed])
+}
+
+// ============================================================================
+// BRIEFINGS
+// ============================================================================
+
+enum BriefingType {
+  MORNING_DIGEST
+  END_OF_DAY
+  PRE_MEETING
+  AD_HOC
+}
+
+model Briefing {
+  id             String       @id @default(cuid())
+  type           BriefingType
+  generatedFor   DateTime
+  bodyMarkdown   String       @db.Text
+  modelUsed      String
+  teamsMessageId String?      // was slackTs — Teams message reference, if returned
+  generatedAt    DateTime     @default(now())
+
+  @@index([type, generatedFor])
+}
+
+// ============================================================================
+// AUDIT LOG — every Claude call, every action (governance backbone)
+// ============================================================================
+
+model AuditLog {
+  id            String   @id @default(cuid())
+  eventType     String
+  agent         String?
+  model         String?
+  promptTokens  Int?
+  outputTokens  Int?
+  cachedTokens  Int?
+  costUsd       Decimal? @db.Decimal(10, 6)
+  payload       Json?
+  resultRefId   String?
+  createdAt     DateTime @default(now())
+
+  @@index([eventType, createdAt])
+  @@index([resultRefId])
+}
+
+// ============================================================================
+// GRAPH SUBSCRIPTION STATE — persist the active mail subscription id
+// ============================================================================
+
+model GraphSubscription {
+  id                 String   @id @default(cuid())
+  subscriptionId     String   @unique // Graph subscription id
+  resource           String
+  expirationDateTime DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
