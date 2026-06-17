@@ -4,13 +4,14 @@ import { env } from '../lib/env.js';
 import { buildSystem } from '../prompts/ceo-context.js';
 import { prisma } from '../db/prisma.js';
 import { getTranscript } from '../integrations/assemblyai.js';
+import { fetchLatestTeamsTranscript } from '../integrations/graph-transcripts.js';
 
 const EXTRACTOR_INSTRUCTIONS = `
 You process meeting transcripts (with speaker labels) into structured notes.
 
-The transcript will identify speakers as "Speaker A", "Speaker B", etc.
-You will also receive an attendee list mapping speaker letters to real names
-when available — use those real names in your output. If a speaker is
+Speakers may be identified by real names (Teams transcripts) or as "Speaker A",
+"Speaker B" (AssemblyAI). You will also receive an attendee list mapping speakers
+to real names when available — use real names in your output. If a speaker is
 unidentified, refer to them as "Speaker X (unidentified)".
 
 EXTRACT THE FOLLOWING:
@@ -18,29 +19,19 @@ EXTRACT THE FOLLOWING:
 1. SUMMARY: 3-5 sentences. What did this meeting accomplish? Lead with the
    most important outcome.
 
-2. KEY_DECISIONS: Concrete decisions made in the meeting. For each:
-   - decision: what was decided (one sentence, action-oriented)
-   - owner: who is responsible
-   - context: why this decision was made (one sentence)
+2. KEY_DECISIONS: Concrete decisions made. For each: decision, owner, context.
 
-3. CEO_COMMITMENTS: Things Nalin (the CEO) personally committed to do. These
-   are the CRITICAL items — they go on his task list. For each:
-   - commitment: what Nalin said he would do
-   - deadline: when (parse phrases like "by end of week" into ISO date if possible,
-     else state the phrase)
-   - recipient: who he committed to (person or party)
+3. CEO_COMMITMENTS: Things Nalin (the CEO) personally committed to. These are the
+   CRITICAL items — they go on his task list. For each: commitment, deadline
+   (parse "by end of week" into ISO date if possible, else the phrase), recipient.
 
-4. ACTION_ITEMS: All other action items NOT owned by the CEO. For each:
-   - text: the action
-   - owner: who owns it (use real name from attendee list)
-   - dueDate: ISO date if specified, null otherwise
-   - isCeoTask: false for these (CEO items go in CEO_COMMITMENTS)
+4. ACTION_ITEMS: All other action items NOT owned by the CEO. For each: text,
+   owner (real name from attendee list), dueDate (ISO date if specified, else null).
 
 5. OPEN_QUESTIONS: Unresolved questions raised but not answered. For each:
-   - question: the question
-   - raisedBy: who raised it
+   question, raisedBy.
 
-6. TOPICS: 3-7 short topic tags (e.g. "Amazon ads", "Q4 planning", "supplier QC")
+6. TOPICS: 3-7 short topic tags.
 
 REGULATORY FLAG:
 If the meeting discusses making any disease claim, unsubstantiated health claim,
@@ -107,46 +98,57 @@ const extractTool: Anthropic.Messages.Tool = {
       },
       topics: { type: 'array', items: { type: 'string' } },
     },
-    required: [
-      'summary',
-      'keyDecisions',
-      'ceoCommitments',
-      'actionItems',
-      'openQuestions',
-      'topics',
-    ],
+    required: ['summary', 'keyDecisions', 'ceoCommitments', 'actionItems', 'openQuestions', 'topics'],
   },
 };
 
-export async function extractMeeting(meetingId: string) {
-  const meeting = await prisma.meeting.findUniqueOrThrow({
-    where: { id: meetingId },
-  });
-  if (!meeting.assemblyAiId) throw new Error('Meeting has no AssemblyAI ID');
-
-  // 1. Fetch transcript with utterances
-  const transcript = await getTranscript(meeting.assemblyAiId);
-  if (transcript.status !== 'completed') {
-    throw new Error(`Transcript not ready: ${transcript.status}`);
+/**
+ * Resolve a speaker-labeled transcript from whichever source the meeting uses.
+ * Returns { speakerText, segments } or throws if not yet available.
+ */
+async function loadTranscript(meeting: {
+  id: string;
+  transcriptSource: string;
+  assemblyAiId: string | null;
+  graphOnlineMeetingId: string | null;
+}): Promise<{ speakerText: string; segments: any[]; graphTranscriptId?: string }> {
+  if (meeting.transcriptSource === 'TEAMS') {
+    if (!meeting.graphOnlineMeetingId) throw new Error('Teams meeting missing graphOnlineMeetingId');
+    const t = await fetchLatestTeamsTranscript(meeting.graphOnlineMeetingId);
+    if (!t) throw new Error('Teams transcript not available yet (retry later)');
+    return { speakerText: t.text, segments: t.segments, graphTranscriptId: t.transcriptId };
   }
 
-  // 2. Build speaker-labeled text
+  // AssemblyAI fallback
+  if (!meeting.assemblyAiId) throw new Error('Meeting has no AssemblyAI ID');
+  const transcript = await getTranscript(meeting.assemblyAiId);
+  if (transcript.status !== 'completed') throw new Error(`Transcript not ready: ${transcript.status}`);
   const utterances = transcript.utterances ?? [];
-  const speakerText = utterances
-    .map((u) => `Speaker ${u.speaker}: ${u.text}`)
-    .join('\n');
+  const speakerText = utterances.map((u) => `Speaker ${u.speaker}: ${u.text}`).join('\n');
+  return {
+    speakerText: speakerText || (transcript.text ?? ''),
+    segments: utterances as any[],
+  };
+}
+
+export async function extractMeeting(meetingId: string) {
+  const meeting = await prisma.meeting.findUniqueOrThrow({ where: { id: meetingId } });
+
+  // 1. Load transcript from the correct source
+  const { speakerText, segments, graphTranscriptId } = await loadTranscript(meeting as any);
 
   await prisma.meeting.update({
     where: { id: meetingId },
     data: {
       status: 'EXTRACTING',
-      transcriptText: transcript.text ?? '',
-      speakerSegments: utterances as any,
+      transcriptText: speakerText,
+      speakerSegments: segments as any,
       transcribedAt: new Date(),
+      ...(graphTranscriptId ? { graphTranscriptId } : {}),
     },
   });
 
-  // 3. Build attendee mapping string
+  // 2. Build attendee mapping string
   const attendees = (meeting.attendees as any[]) ?? [];
   const attendeeStr = attendees.length
     ? `\nATTENDEES:\n${attendees.map((a) => `- ${a.name} (${a.role ?? 'attendee'})`).join('\n')}`
@@ -156,6 +158,7 @@ export async function extractMeeting(meetingId: string) {
 MEETING: ${meeting.title}
 DATE: ${meeting.meetingDate.toISOString()}
 BUSINESS UNIT: ${meeting.businessUnit}
+TRANSCRIPT SOURCE: ${meeting.transcriptSource}
 ${attendeeStr}
 
 TRANSCRIPT (speaker-labeled):
@@ -164,7 +167,7 @@ ${speakerText}
 Extract structured notes now using the extract_meeting tool.
 `.trim();
 
-  // 4. Run extraction
+  // 3. Run extraction
   const response = await runClaude({
     agent: 'MeetingExtractor',
     model: env.MODEL_EXTRACTION,
@@ -188,7 +191,7 @@ Extract structured notes now using the extract_meeting tool.
 
   if (!result) throw new Error('Extractor did not return tool_use');
 
-  // 5. Persist
+  // 4. Persist
   await prisma.$transaction(async (tx) => {
     await tx.meeting.update({
       where: { id: meetingId },
@@ -203,7 +206,6 @@ Extract structured notes now using the extract_meeting tool.
       },
     });
 
-    // CEO commitments → ActionItem rows with isCeoTask = true
     for (const c of result.input.ceoCommitments) {
       await tx.actionItem.create({
         data: {
@@ -233,9 +235,7 @@ Extract structured notes now using the extract_meeting tool.
 
 function parseDeadline(raw: string): Date | null {
   if (!raw) return null;
-  // Try ISO first
   const iso = new Date(raw);
   if (!isNaN(iso.getTime())) return iso;
-  // Could extend: parse "end of week", "EOD Friday", etc. via chrono-node later.
   return null;
 }

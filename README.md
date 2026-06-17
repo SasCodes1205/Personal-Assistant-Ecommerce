@@ -18,12 +18,6 @@ Private, single-tenant AI assistant for the CEO. Replaces Fireflies, automates e
 | **Frontend** | Next.js 15 + Tailwind + shadcn/ui | Fastest path to a clean internal dashboard. Deploy to Vercel. |
 | **Hosting** | Railway (backend) + Vercel (frontend) | One-click deploys. No AWS Step Functions / Lambda complexity. |
 
-## What this does NOT do (vs v1.1 proposal)
-
-- **No AWS Step Functions / Lambda** — Inngest replaces orchestration with ~10 lines instead of ~500.
-- **No DynamoDB session cache** — Postgres + Anthropic prompt caching handles it.
-- **No vector DB** — Anthropic native memory tool + Postgres full-text search is enough for v1.
-- **No Fireflies subscription** — owned pipeline.
 
 ## Architecture
 

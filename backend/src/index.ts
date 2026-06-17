@@ -13,6 +13,7 @@ import { meetingsRouter } from './routes/meetings.js';
 import { briefingsRouter } from './routes/briefings.js';
 import { webhooksRouter } from './routes/webhooks.js';
 import { vipsRouter } from './routes/vips.js';
+import { subscriptionsRouter } from './routes/subscriptions.js';
 
 const app = new Hono();
 
@@ -32,11 +33,12 @@ app.route('/emails', emailsRouter);
 app.route('/meetings', meetingsRouter);
 app.route('/briefings', briefingsRouter);
 app.route('/vips', vipsRouter);
+app.route('/subscriptions', subscriptionsRouter);
 
-// Webhooks (Gmail Pub/Sub, AssemblyAI completion, Slack events)
+// Webhooks (Microsoft Graph change-notifications + lifecycle, AssemblyAI completion)
 app.route('/webhooks', webhooksRouter);
 
-// Inngest endpoint for background workers
+// Inngest endpoint for background workers (optional)
 app.on(['GET', 'POST', 'PUT'], '/api/inngest', (c) => {
   return inngestServe({ client: inngest, functions: inngestFunctions })(c);
 });
