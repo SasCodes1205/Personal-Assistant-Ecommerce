@@ -1,11 +1,14 @@
 import { Inngest, EventSchemas } from 'inngest';
 import { env } from './env.js';
 
-// Event types for type-safe Inngest functions
+// Event types for type-safe Inngest functions.
+// NOTE: Inngest is OPTIONAL for the MVP — the email/meeting flows run inline.
+// Its value drops further now that Teams transcripts return quickly via Graph.
+// Keep this only if you want durable retries/fan-out later.
 type Events = {
-  'meeting/uploaded': { data: { meetingId: string; audioUrl: string } };
-  'meeting/transcribed': { data: { meetingId: string; assemblyAiId: string } };
-  'email/received': { data: { gmailMessageId: string } };
+  'meeting/pending': { data: { meetingId: string; source: 'TEAMS' | 'ASSEMBLYAI' | 'UPLOAD' } };
+  'meeting/transcribed': { data: { meetingId: string } };
+  'email/received': { data: { providerMessageId: string } };
   'email/triaged': { data: { emailId: string } };
   'briefing/scheduled': { data: { type: 'MORNING_DIGEST' | 'END_OF_DAY' } };
 };
@@ -16,12 +19,4 @@ export const inngest = new Inngest({
   schemas: new EventSchemas().fromRecord<Events>(),
 });
 
-// Function registry — imported and registered with serve()
-// Each function is a separate file under src/agents/workers/
-// Stub array; populate as you build each workflow.
-export const inngestFunctions: any[] = [
-  // import { processMeetingFn } from '../agents/workers/process-meeting.js'
-  // import { triageEmailFn } from '../agents/workers/triage-email.js'
-  // import { generateDraftFn } from '../agents/workers/generate-draft.js'
-  // import { sendBriefingFn } from '../agents/workers/send-briefing.js'
-];
+export const inngestFunctions: any[] = [];

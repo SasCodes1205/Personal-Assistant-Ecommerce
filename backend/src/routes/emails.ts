@@ -2,12 +2,11 @@ import { Hono } from 'hono';
 import { prisma } from '../db/prisma.js';
 import { triageEmail } from '../agents/email-triage.js';
 import { generateDraft } from '../agents/email-drafter.js';
-import { sendDraft as gmailSendDraft } from '../integrations/gmail.js';
+import { updateDraftBody } from '../integrations/graph-mail.js';
 import { logger } from '../lib/logger.js';
 
 export const emailsRouter = new Hono();
 
-// List emails (with optional filters)
 emailsRouter.get('/', async (c) => {
   const category = c.req.query('category');
   const emails = await prisma.email.findMany({
@@ -19,7 +18,7 @@ emailsRouter.get('/', async (c) => {
   return c.json({ emails });
 });
 
-// List pending drafts (for the approval dashboard)
+// Pending drafts for the approval dashboard (now includes compliance fields)
 emailsRouter.get('/drafts/pending', async (c) => {
   const drafts = await prisma.draft.findMany({
     where: { status: 'PENDING_REVIEW' },
@@ -29,7 +28,16 @@ emailsRouter.get('/drafts/pending', async (c) => {
   return c.json({ drafts });
 });
 
-// Get one email
+// Drafts blocked by the compliance reviewer (visible but not sendable)
+emailsRouter.get('/drafts/blocked', async (c) => {
+  const drafts = await prisma.draft.findMany({
+    where: { status: 'AUTO_REJECTED' },
+    orderBy: { createdAt: 'desc' },
+    include: { email: true },
+  });
+  return c.json({ drafts });
+});
+
 emailsRouter.get('/:id', async (c) => {
   const email = await prisma.email.findUnique({
     where: { id: c.req.param('id') },
@@ -39,19 +47,26 @@ emailsRouter.get('/:id', async (c) => {
   return c.json(email);
 });
 
-// Manually trigger triage on an email (debug + retry)
 emailsRouter.post('/:id/triage', async (c) => {
   const result = await triageEmail(c.req.param('id'));
   return c.json(result);
 });
 
-// Manually trigger draft generation
 emailsRouter.post('/:id/draft', async (c) => {
   const result = await generateDraft(c.req.param('id'));
   return c.json(result);
 });
 
-// Approve a draft — sends via Gmail
+/**
+ * Approve a draft.
+ *
+ * SECURITY MODEL (Master Plan: "read + draft only, no send without approval"):
+ * The app holds Mail.ReadWrite, NOT Mail.Send. Approving does NOT auto-send.
+ * If the CEO edited the text, we PATCH the Outlook draft so the edited version is
+ * what's in his Drafts folder, then mark it APPROVED. The CEO sends from Outlook.
+ *
+ * RED-zone drafts are AUTO_REJECTED at creation and never reach this endpoint.
+ */
 emailsRouter.post('/drafts/:id/approve', async (c) => {
   const draftId = c.req.param('id');
   const body = await c.req.json().catch(() => ({}));
@@ -62,37 +77,35 @@ emailsRouter.post('/drafts/:id/approve', async (c) => {
     include: { email: true },
   });
 
-  const flags = draft.complianceFlags as { gmailDraftId?: string } | null;
-  if (!flags?.gmailDraftId) {
-    return c.json({ error: 'No Gmail draft ID stored' }, 400);
+  if (draft.status === 'AUTO_REJECTED') {
+    return c.json({ error: 'Draft was blocked by compliance review and cannot be approved' }, 409);
   }
 
-  // If CEO edited, we'd need to re-create the Gmail draft. For MVP, we send as-is
-  // and store the edit for audit. Production: PATCH the Gmail draft before sending.
-  await gmailSendDraft(flags.gmailDraftId);
+  // If edited, update the Outlook draft body so Drafts reflects the final text.
+  if (editedBody && draft.providerDraftId) {
+    await updateDraftBody(draft.providerDraftId, editedBody);
+  }
 
   const updated = await prisma.draft.update({
     where: { id: draftId },
     data: {
-      status: editedBody ? 'EDITED_AND_SENT' : 'APPROVED',
+      status: 'APPROVED', // CEO sends from Outlook Drafts; no auto-send here
       editedBody,
-      sentAt: new Date(),
     },
   });
 
   await prisma.auditLog.create({
     data: {
-      eventType: 'draft_approved_and_sent',
+      eventType: 'draft_approved',
       resultRefId: draftId,
-      payload: { wasEdited: !!editedBody },
+      payload: { wasEdited: !!editedBody, complianceZone: draft.complianceZone },
     },
   });
 
-  logger.info({ draftId }, 'draft.sent');
+  logger.info({ draftId }, 'draft.approved');
   return c.json(updated);
 });
 
-// Reject a draft
 emailsRouter.post('/drafts/:id/reject', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const updated = await prisma.draft.update({
@@ -100,11 +113,7 @@ emailsRouter.post('/drafts/:id/reject', async (c) => {
     data: { status: 'REJECTED', rejectedReason: body.reason ?? 'No reason given' },
   });
   await prisma.auditLog.create({
-    data: {
-      eventType: 'draft_rejected',
-      resultRefId: updated.id,
-      payload: { reason: body.reason },
-    },
+    data: { eventType: 'draft_rejected', resultRefId: updated.id, payload: { reason: body.reason } },
   });
   return c.json(updated);
 });

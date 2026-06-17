@@ -1,7 +1,6 @@
 {
   "name": "ceo-assistant-backend",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -14,11 +13,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.0",
+    "@azure/msal-node": "^2.16.2",
     "@hono/node-server": "^1.13.0",
     "@prisma/client": "^5.22.0",
-    "@slack/web-api": "^7.7.0",
     "assemblyai": "^4.8.0",
-    "googleapis": "^144.0.0",
     "hono": "^4.6.0",
     "inngest": "^3.27.0",
     "pino": "^9.5.0",

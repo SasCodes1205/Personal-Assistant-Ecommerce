@@ -6,23 +6,29 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1),
   MODEL_TRIAGE: z.string().default('claude-haiku-4-5-20251001'),
   MODEL_DRAFT: z.string().default('claude-sonnet-4-6'),
-  MODEL_BRIEFING: z.string().default('claude-opus-4-7'),
+  MODEL_BRIEFING: z.string().default('claude-opus-4-8'),     // updated from stale 4-7
   MODEL_EXTRACTION: z.string().default('claude-sonnet-4-6'),
+  MODEL_COMPLIANCE: z.string().default('claude-opus-4-8'),   // NEW — high-tier for regulatory stakes
 
   ASSEMBLYAI_API_KEY: z.string().min(1),
   ASSEMBLYAI_WEBHOOK_AUTH_HEADER: z.string().default('X-Webhook-Secret'),
   ASSEMBLYAI_WEBHOOK_SECRET: z.string().min(1),
 
-  GOOGLE_CLIENT_ID: z.string().optional(),
-  GOOGLE_CLIENT_SECRET: z.string().optional(),
-  GOOGLE_REFRESH_TOKEN: z.string().optional(),
-  GMAIL_USER_EMAIL: z.string().email().optional(),
-  GMAIL_PUSH_TOPIC: z.string().optional(),
+  // ----- Microsoft 365 (Entra app registration) — replaces Google/Gmail -----
+  AZURE_TENANT_ID: z.string().min(1),
+  AZURE_CLIENT_ID: z.string().min(1),
+  AZURE_CLIENT_SECRET: z.string().min(1),
+  MS_MAILBOX: z.string().email(),                 // CEO email / UPN the app reads + drafts in
+  GRAPH_SUBSCRIPTION_CLIENT_STATE: z.string().min(8), // random secret to validate notifications
 
-  SLACK_BOT_TOKEN: z.string().optional(),
-  SLACK_SIGNING_SECRET: z.string().optional(),
-  SLACK_CEO_USER_ID: z.string().optional(),
-  SLACK_BRIEFINGS_CHANNEL: z.string().optional(),
+  // ----- Microsoft Teams (briefings/alerts) — replaces Slack -----
+  TEAMS_WEBHOOK_URL: z.string().url().optional(), // Power Automate incoming webhook
+
+  // Public URL is required for Graph change-notification webhooks
+  PUBLIC_API_URL: z.string().url(),
+
+  // Auth secret protecting internal trigger endpoints (briefings, subscription renew)
+  INTERNAL_API_SECRET: z.string().min(8),
 
   INNGEST_EVENT_KEY: z.string().optional(),
   INNGEST_SIGNING_KEY: z.string().optional(),

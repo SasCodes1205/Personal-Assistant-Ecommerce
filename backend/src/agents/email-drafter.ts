@@ -2,7 +2,8 @@ import { runClaude, getText } from '../integrations/anthropic.js';
 import { env } from '../lib/env.js';
 import { buildSystem } from '../prompts/ceo-context.js';
 import { prisma } from '../db/prisma.js';
-import { createDraft } from '../integrations/gmail.js';
+import { createDraft } from '../integrations/graph-mail.js';
+import { reviewCompliance, FDA_DISCLAIMER } from './compliance-reviewer.js';
 
 const DRAFTER_INSTRUCTIONS = `
 You are the email reply drafter. You write reply drafts in the CEO's voice.
@@ -39,17 +40,16 @@ NO_DRAFT: <one sentence reason>
 `.trim();
 
 export async function generateDraft(emailId: string): Promise<{
-  status: 'DRAFTED' | 'NO_DRAFT';
+  status: 'DRAFTED' | 'NO_DRAFT' | 'BLOCKED';
   draftId?: string;
+  zone?: string;
   reason?: string;
 }> {
-  const email = await prisma.email.findUniqueOrThrow({
-    where: { id: emailId },
-  });
+  const email = await prisma.email.findUniqueOrThrow({ where: { id: emailId } });
 
   // Pull last 3 messages in thread for context (if any)
   const threadHistory = await prisma.email.findMany({
-    where: { gmailThreadId: email.gmailThreadId, id: { not: emailId } },
+    where: { providerThreadId: email.providerThreadId, id: { not: emailId } },
     orderBy: { receivedAt: 'desc' },
     take: 3,
   });
@@ -82,22 +82,61 @@ Draft the reply now.
     resultRefId: emailId,
   });
 
-  const text = getText(response).trim();
+  let text = getText(response).trim();
 
   if (text.startsWith('NO_DRAFT:')) {
     return { status: 'NO_DRAFT', reason: text.replace('NO_DRAFT:', '').trim() };
   }
 
-  // Create the Gmail draft
+  // ── COMPLIANCE GATE (Master Plan Section 6) ──────────────────────────────
+  // Every claim-bearing draft is scanned BEFORE it reaches the approval queue.
+  const compliance = await reviewCompliance(
+    text,
+    `1:1 outbound email reply for ${email.businessUnit}; recipient category ${email.category}`,
+    emailId
+  );
+
+  // YELLOW: append the FDA disclaimer if it's not already present.
+  if (
+    compliance.zone === 'YELLOW' &&
+    compliance.disclaimerRequired &&
+    !text.includes('has not been evaluated by the Food and Drug Administration')
+  ) {
+    text = `${text}\n\n---\n${FDA_DISCLAIMER}`;
+  }
+
+  // RED: block. Persist an AUTO_REJECTED draft for the audit trail; do NOT create
+  // an Outlook draft. The CEO sees it flagged in the dashboard, never sends it.
+  if (compliance.zone === 'RED') {
+    const blocked = await prisma.draft.create({
+      data: {
+        emailId,
+        bodyText: text,
+        modelUsed: env.MODEL_DRAFT,
+        status: 'AUTO_REJECTED',
+        complianceZone: 'RED',
+        complianceFlags: compliance as any,
+      },
+    });
+    await prisma.auditLog.create({
+      data: {
+        eventType: 'draft_auto_rejected',
+        agent: 'ComplianceReviewer',
+        resultRefId: blocked.id,
+        payload: compliance as any,
+      },
+    });
+    return { status: 'BLOCKED', draftId: blocked.id, zone: 'RED', reason: compliance.reasoning };
+  }
+
+  // GREEN / YELLOW: create the Outlook draft (lands in CEO's Drafts folder).
   const subject = email.subject.toLowerCase().startsWith('re:')
     ? email.subject
     : `Re: ${email.subject}`;
 
-  const gmailDraft = await createDraft({
-    to: email.from,
-    subject,
+  const { providerDraftId } = await createDraft({
+    replyToMessageId: email.providerMessageId,
     body: text,
-    threadId: email.gmailThreadId,
   });
 
   const draft = await prisma.draft.create({
@@ -106,10 +145,11 @@ Draft the reply now.
       bodyText: text,
       modelUsed: env.MODEL_DRAFT,
       status: 'PENDING_REVIEW',
-      // Store gmail draft id in compliance flags JSON for now; add dedicated col later
-      complianceFlags: { gmailDraftId: gmailDraft.id },
+      providerDraftId,
+      complianceZone: compliance.zone, // GREEN or YELLOW
+      complianceFlags: compliance as any,
     },
   });
 
-  return { status: 'DRAFTED', draftId: draft.id };
+  return { status: 'DRAFTED', draftId: draft.id, zone: compliance.zone };
 }

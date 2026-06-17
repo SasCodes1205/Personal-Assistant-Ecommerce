@@ -2,38 +2,38 @@ import { runClaude, getText } from '../integrations/anthropic.js';
 import { env } from '../lib/env.js';
 import { buildSystem } from '../prompts/ceo-context.js';
 import { prisma } from '../db/prisma.js';
-import { postBriefing, markdownToBlocks } from '../integrations/slack.js';
+import { postBriefing } from '../integrations/teams.js';
 
 const MORNING_INSTRUCTIONS = `
-You produce the CEO's MORNING BRIEFING. It is delivered via Slack at 6:00 AM NJ time,
-which is 3:30 PM Sri Lanka time (team's end-of-workday).
+You produce the CEO's MORNING BRIEFING. It is delivered via Microsoft Teams at
+6:00 AM NJ time (ET), Mon-Fri — which is 3:30 PM Sri Lanka time (team's end-of-workday).
 
 STRUCTURE (use exactly this markdown — concise, scannable):
 
 # Morning Briefing — <date>
 
-## 🎯 Top 3 Priorities Today
+## Top 3 Priorities Today
 Three highest-leverage items. One line each. Lead with the most important.
 
-## 📬 Email Queue
-- Pending drafts: <N> (link: dashboard)
+## Email Queue
+- Pending drafts: <N> (review in dashboard)
 - VIP threads waiting: <list with one-line context each>
 - Anything URGENT not yet drafted: <list>
 
-## 📋 Open CEO Commitments
+## Open CEO Commitments
 List Nalin's outstanding commitments from recent meetings. Show the recipient and
-the original deadline. Flag anything overdue with ⚠️.
+the original deadline. Flag anything overdue.
 
-## 🇱🇰 Sri Lanka Team — End of Day Summary
+## Sri Lanka Team — End of Day Summary
 What did the team complete today (their EOD)? What's blocked? What needs CEO
 input before they start tomorrow (NJ evening = SL morning)?
 If no team updates are available, state that.
 
-## 📅 Today's Meetings
+## Today's Meetings
 List today's meetings (NJ time + SL time). Note any with no agenda or unprepared
 materials. Empty section = "No external meetings scheduled."
 
-## ⚠️ Flags
+## Flags
 Regulatory issues, overdue items, items requiring CEO judgment.
 Empty section = "None."
 
@@ -47,7 +47,6 @@ RULES:
 `.trim();
 
 export async function generateMorningBriefing() {
-  // Gather raw data from the past 24 hours
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   const [pendingDrafts, vipEmails, urgentEmails, openCommitments, recentMeetings] =
@@ -127,10 +126,13 @@ Now generate the briefing.
     },
   });
 
-  // Push to Slack
-  const ts = await postBriefing(`Morning Briefing`, markdownToBlocks(markdown));
-  if (ts) {
-    await prisma.briefing.update({ where: { id: briefing.id }, data: { slackTs: ts } });
+  // Push to Microsoft Teams (replaces Slack)
+  const ok = await postBriefing(markdown);
+  if (ok) {
+    await prisma.briefing.update({
+      where: { id: briefing.id },
+      data: { teamsMessageId: 'posted' },
+    });
   }
 
   return briefing;
